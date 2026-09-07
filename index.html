@@ -334,10 +334,15 @@
 
             <div class="button-section">
                 <button id="playBtn" class="primary-btn">▶️ تشغيل التعليق الصوتي</button>
+                <button id="recordBtn" class="primary-btn" style="background: linear-gradient(135deg, var(--accent), var(--success));">⏺️ تسجيل وتحميل الصوت</button>
                 <button id="stopBtn" class="secondary-btn">⏹️ إيقاف</button>
+                <a id="downloadLink" class="secondary-btn" style="display:none; text-align:center; text-decoration:none; border-color: var(--success-light); color: var(--success-light);">⬇️ تحميل الملف الصوتي (webm)</a>
             </div>
 
             <p id="statusMsg" class="status-msg"></p>
+            <p style="text-align:center; font-size:0.75rem; color:var(--text-muted); margin-top:8px;">
+                ⚠️ التحميل يعمل حالياً على Chrome / Edge فقط، ويتطلب اختيار "هذا التبويب" وتفعيل مربّع "مشاركة صوت التبويب" عند ظهور نافذة الإذن.
+            </p>
         </div>
     </div>
 
@@ -353,11 +358,37 @@
         const pitchValue = document.getElementById('pitchValue');
         const volumeValue = document.getElementById('volumeValue');
         const playBtn = document.getElementById('playBtn');
+        const recordBtn = document.getElementById('recordBtn');
         const stopBtn = document.getElementById('stopBtn');
         const statusMsg = document.getElementById('statusMsg');
+        const downloadLink = document.getElementById('downloadLink');
 
         let voices = [];
         const synth = window.speechSynthesis;
+
+        let mediaRecorder = null;
+        let recordedChunks = [];
+        let displayStream = null;
+
+        function buildUtterance(text) {
+            const utterance = new SpeechSynthesisUtterance(text);
+            const selectedVoice = voices.find(v => v.name === voiceSelect.value);
+            if (selectedVoice) utterance.voice = selectedVoice;
+            utterance.rate = parseFloat(rateSlider.value);
+            utterance.pitch = parseFloat(pitchSlider.value);
+            utterance.volume = parseFloat(volumeSlider.value);
+            return utterance;
+        }
+
+        function stopRecordingAndCleanup() {
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                mediaRecorder.stop();
+            }
+            if (displayStream) {
+                displayStream.getTracks().forEach(t => t.stop());
+                displayStream = null;
+            }
+        }
 
         // التحقق من دعم المتصفح لميزة تحويل النص إلى كلام
         if (!('speechSynthesis' in window)) {
@@ -458,9 +489,93 @@
             synth.speak(utterance);
         });
 
+        // تسجيل الصوت أثناء التشغيل وتحميله كملف
+        recordBtn.addEventListener('click', async () => {
+            const text = textContainer.value.trim();
+            if (!text) {
+                statusMsg.textContent = '⚠️ الرجاء كتابة نص أو رفع ملف أولاً.';
+                statusMsg.classList.add('error');
+                return;
+            }
+
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+                statusMsg.textContent = '⚠️ متصفحك لا يدعم تسجيل صوت التبويب. جرّب Chrome أو Edge.';
+                statusMsg.classList.add('error');
+                return;
+            }
+
+            downloadLink.style.display = 'none';
+            synth.cancel();
+
+            try {
+                statusMsg.textContent = '📌 اختر "هذا التبويب" وفعّل "مشاركة صوت التبويب" في النافذة التي ستظهر...';
+                statusMsg.classList.remove('error');
+
+                displayStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: true,
+                    audio: true,
+                    preferCurrentTab: true
+                });
+
+                const audioTracks = displayStream.getAudioTracks();
+                if (audioTracks.length === 0) {
+                    statusMsg.textContent = '⚠️ لم يتم تفعيل مشاركة الصوت. أعد المحاولة وفعّل الخيار.';
+                    statusMsg.classList.add('error');
+                    displayStream.getTracks().forEach(t => t.stop());
+                    displayStream = null;
+                    return;
+                }
+
+                // إيقاف مسار الفيديو فوراً لأننا نحتاج الصوت فقط
+                displayStream.getVideoTracks().forEach(t => t.stop());
+
+                const audioOnlyStream = new MediaStream(audioTracks);
+                recordedChunks = [];
+                mediaRecorder = new MediaRecorder(audioOnlyStream);
+
+                mediaRecorder.ondataavailable = (e) => {
+                    if (e.data.size > 0) recordedChunks.push(e.data);
+                };
+
+                mediaRecorder.onstop = () => {
+                    const blob = new Blob(recordedChunks, { type: 'audio/webm' });
+                    const url = URL.createObjectURL(blob);
+                    downloadLink.href = url;
+                    downloadLink.download = 'تعليق-صوتي.webm';
+                    downloadLink.style.display = 'block';
+                    statusMsg.textContent = '✅ التسجيل جاهز — اضغط زر التحميل أدناه.';
+                    statusMsg.classList.remove('error');
+                };
+
+                mediaRecorder.start();
+
+                const utterance = buildUtterance(text);
+                utterance.onstart = () => {
+                    statusMsg.textContent = '⏺️ جاري التسجيل والتشغيل...';
+                };
+                utterance.onend = () => {
+                    stopRecordingAndCleanup();
+                };
+                utterance.onerror = () => {
+                    stopRecordingAndCleanup();
+                };
+
+                synth.speak(utterance);
+
+            } catch (err) {
+                statusMsg.textContent = '⚠️ تم إلغاء التسجيل أو رفض الإذن.';
+                statusMsg.classList.add('error');
+                if (displayStream) {
+                    displayStream.getTracks().forEach(t => t.stop());
+                    displayStream = null;
+                }
+            }
+        });
+
         // إيقاف التشغيل
         stopBtn.addEventListener('click', () => {
             synth.cancel();
+            stopRecordingAndCleanup();
             statusMsg.textContent = '⏹️ تم الإيقاف.';
             statusMsg.classList.remove('error');
         });
